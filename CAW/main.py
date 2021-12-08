@@ -12,12 +12,10 @@ args, sys_argv = get_args()
 
 BATCH_SIZE = args.bs
 NUM_NEIGHBORS = args.n_degree
-NUM_EPOCH = args.n_epoch
+NUM_EPOCH = 50
 ATTN_NUM_HEADS = args.attn_n_head
 DROP_OUT = args.drop_out
-GPU = args.gpu
-USE_TIME = args.time
-ATTN_AGG_METHOD = args.attn_agg_method
+
 ATTN_MODE = args.attn_mode
 DATA = args.data
 NUM_LAYER = args.n_layer
@@ -30,7 +28,7 @@ WALK_MUTUAL = args.walk_mutual if WALK_POOL == 'attn' else False
 TOLERANCE = args.tolerance
 CPU_CORES = args.cpu_cores
 NGH_CACHE = args.ngh_cache
-VERBOSITY = args.verbosity
+VERBOSITY = 1
 AGG = args.agg
 SEED = args.seed
 assert(CPU_CORES >= -1)
@@ -118,10 +116,9 @@ rlimit = resource.getrlimit(resource.RLIMIT_NOFILE)
 resource.setrlimit(resource.RLIMIT_NOFILE, (200*args.bs, rlimit[1]))
 
 # model initialization
-device = torch.device('cuda:{}'.format(GPU))
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 cawn = CAWN(n_feat, e_feat, agg=AGG,
-            num_layers=NUM_LAYER, use_time=USE_TIME, attn_agg_method=ATTN_AGG_METHOD, attn_mode=ATTN_MODE,
-            n_head=ATTN_NUM_HEADS, drop_out=DROP_OUT, pos_dim=POS_DIM, pos_enc=POS_ENC,
+            num_layers=NUM_LAYER, drop_out=DROP_OUT, pos_dim=POS_DIM, pos_enc=POS_ENC,
             num_neighbors=NUM_NEIGHBORS, walk_n_head=WALK_N_HEAD, walk_mutual=WALK_MUTUAL, walk_linear_out=args.walk_linear_out, walk_pool=args.walk_pool,
             cpu_cores=CPU_CORES, verbosity=VERBOSITY, get_checkpoint_path=get_checkpoint_path)
 cawn.to(device)

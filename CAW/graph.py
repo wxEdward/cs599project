@@ -308,48 +308,6 @@ class NeighborFinder:
         key = (node, ts_str)
         return self.cache.get(key)
 
-    def compute_degs(self):
-        '''
-        (only for data analysis)
-        Return node average degrees and a numpy array of all node degrees
-        '''
-        node_idx_l = self.node_idx_l
-        node_ts_l = self.node_ts_l
-        edge_idx_l = self.edge_idx_l
-        degs = []
-        for n_idx, ts, e_idx in zip(node_idx_l, node_ts_l, edge_idx_l):
-            deg = len(self.find_before(n_idx, ts, e_idx=e_idx)[0])
-            degs.append(deg)
-        degs = np.array(degs)
-        return degs.mean(), degs
 
-    def compute_2hop_degs(self, progress_bar=False, n_workers=1):
-
-        '''
-        (only for data analysis)
-        Return a list of 2-tuples where the first element is one-hop degree, and the second is strict 2-hop degrees
-        TODO: Currently very unscalable
-        '''
-        def float2str(ts):
-            return str(round(ts, 5))
-        node_idx_l = self.node_idx_l
-        node_ts_l = self.node_ts_l
-        edge_idx_l = self.edge_idx_l
-        degs = []
-        if progress_bar:
-            from tqdm import tqdm_notebook as tqdm
-            iterable = tqdm(zip(node_idx_l, node_ts_l, edge_idx_l), total=len(node_idx_l))
-        else:
-            iterable = zip(node_idx_l, node_ts_l, edge_idx_l)
-        for n_idx, n_ts, e_idx in iterable:
-            one_hop_n_idx, one_hop_e_idx, one_hop_ts = self.find_before(n_idx, n_ts, e_idx)
-            one_hop_node_l = set([(n, float2str(ts)) for n, ts in zip(one_hop_n_idx, one_hop_ts)])
-            two_hop_node_l = []
-            for n, ts, e in zip(one_hop_n_idx, one_hop_ts, one_hop_e_idx):
-                two_hop_n_idx, _, two_hop_ts = self.find_before(n, ts, e_idx=e)
-                two_hop_node_l.extend([(two_n, float2str(two_ts)) for two_n, two_ts in zip(two_hop_n_idx, two_hop_ts)])
-            two_hop_node_l =  set(two_hop_node_l) - one_hop_node_l
-            degs.append((len(one_hop_node_l), two_hop_node_l))
-        return degs
 
 

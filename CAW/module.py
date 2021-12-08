@@ -45,31 +45,8 @@ class MergeLayer(torch.nn.Module):
             z = z_walk.sum(dim=-1, keepdim=True)  # z shape [B, 1]
         return z
 
-class TimeEncoder(torch.nn.Module):
-    def __init__(self, expand_dim, factor=5):
-        super(TimeEncoder, self).__init__()
-
-        self.time_dim = expand_dim
-        self.factor = factor
-        self.basis_freq = torch.nn.Parameter((torch.from_numpy(1 / 10 ** np.linspace(0, 9, self.time_dim))).float())
-        self.phase = torch.nn.Parameter(torch.zeros(self.time_dim).float())
-
-
-    def forward(self, ts):
-        # ts: [N, L]
-        batch_size = ts.size(0)
-        seq_len = ts.size(1)
-
-        ts = ts.view(batch_size, seq_len, 1)  # [N, L, 1]
-        map_ts = ts * self.basis_freq.view(1, 1, -1)  # [N, L, time_dim]
-        map_ts += self.phase.view(1, 1, -1)
-
-        harmonic = torch.cos(map_ts)
-
-        return harmonic
-
 class CAWN(torch.nn.Module):
-    def __init__(self, n_feat, e_feat, agg='walk',
+    def __init__(self, n_feat, e_feat,
                  pos_dim=0, pos_enc='spd', walk_pool='attn', walk_n_head=8, walk_mutual=False,
                  num_layers=3, drop_out=0.1, num_neighbors=20, cpu_cores=1,
                  verbosity=1, get_checkpoint_path=None, walk_linear_out=False):
@@ -93,9 +70,6 @@ class CAWN(torch.nn.Module):
         self.pos_enc = pos_enc
         self.model_dim = self.feat_dim + self.edge_feat_dim + self.time_dim + self.pos_dim
         self.logger.info('neighbors: {}, node dim: {}, edge dim: {}, pos dim: {}, edge dim: {}'.format(self.num_neighbors, self.feat_dim, self.edge_feat_dim, self.pos_dim, self.time_dim))
-
-        # aggregation method
-        self.agg = agg
 
         # walk-based attention/summation model hyperparameters
         self.walk_pool = walk_pool
@@ -217,19 +191,15 @@ class CAWN(torch.nn.Module):
     def retrieve_time_features(self, cut_ts, t_records):
         device = self.node_features.device
         batch = len(cut_ts)
-        if self.agg == 'walk':
-            t_records_th = torch.from_numpy(t_records).float().to(device)
-            t_records_th = t_records_th.select(dim=-1, index=0).unsqueeze(dim=2) - t_records_th
-            n_walk, len_walk = t_records_th.size(1), t_records_th.size(2)
-            time_features = self.time_encoder(t_records_th.view(batch, -1)).view(batch, n_walk, len_walk,
-                                                                                 self.time_encoder.time_dim)
-        else:
-            raise NotImplementedError('{} forward propagation strategy not implemented.'.format(self.agg))
+        t_records_th = torch.from_numpy(t_records).float().to(device)
+        t_records_th = t_records_th.select(dim=-1, index=0).unsqueeze(dim=2) - t_records_th
+        n_walk, len_walk = t_records_th.size(1), t_records_th.size(2)
+        time_features = self.time_encoder(t_records_th.view(batch, -1)).view(batch, n_walk, len_walk,
+                                                                             self.time_encoder.time_dim)
         return time_features
 
     def retrieve_edge_features(self, eidx_records):
-        # Notice that if subgraph is tree, then len(eidx_records) is just the number of hops, excluding the src node
-        # but if subgraph is walk, then eidx_records contains the random walks of length len_walk+1, including the src node
+        #eidx_records contains the random walks of length len_walk+1, including the src node
         device = self.node_features.device
         eidx_records_th = torch.from_numpy(eidx_records).to(device)
         eidx_records_th[:, :, 0] = 0   # NOTE: this will NOT be mixed with padded 0's since those paddings are denoted by masks and will be ignored later in lstm
@@ -271,25 +241,16 @@ class PositionEncoder(nn.Module):
         self.ngh_finder = ngh_finder
         self.verbosity = verbosity
         self.logger = logger
-        if self.enc == 'spd':
-            self.trainable_embedding = nn.Embedding(num_embeddings=self.num_layers+2, embedding_dim=self.enc_dim) # [0, 1, ... num_layers, inf]
-        else:
-            assert(self.enc in ['lp', 'saw'])
-            self.trainable_embedding = nn.Sequential(nn.Linear(in_features=self.num_layers+1, out_features=self.enc_dim),
+        self.trainable_embedding = nn.Sequential(nn.Linear(in_features=self.num_layers+1, out_features=self.enc_dim),
                                                      nn.ReLU(),
                                                      nn.Linear(in_features=self.enc_dim, out_features=self.enc_dim))  # landing prob at [0, 1, ... num_layers]
-        self.logger.info("Distance encoding: {}".format(self.enc))
 
     def init_internal_data(self, src_idx, dst_idx, cut_ts, subgraph_src, subgraph_tgt):
         if self.enc_dim == 0:
             return
-        start = time.time()
         # initialize internal data structure to index node positions
         self.nodetime2emb_maps = self.collect_pos_mapping_ptree(src_idx, dst_idx, cut_ts, subgraph_src,
                                                                 subgraph_tgt)
-        end = time.time()
-        if self.verbosity > 1:
-            self.logger.info('init positions encodings for the minibatch, time eclipsed: {} seconds'.format(str(end-start)))
 
     def collect_pos_mapping_ptree(self, src_idx, dst_idx, cut_ts, subgraph_src, subgraph_tgt):
         # Return:
@@ -310,102 +271,35 @@ class PositionEncoder(nn.Module):
                                                                    src_neighbors_node, src_neighbors_ts,
                                                                    tgt_neighbors_node, tgt_neighbors_ts, batch_idx=row, enc=self.enc)
                 nodetime2emb_maps.update(nodetime2emb_map)
-
         return nodetime2emb_maps
 
     @staticmethod
     def collect_pos_mapping_ptree_sample(src, tgt, cut_time, src_neighbors_node, src_neighbors_ts,
-                                         tgt_neighbors_node, tgt_neighbors_ts, batch_idx, enc='spd'):
+                                         tgt_neighbors_node, tgt_neighbors_ts, batch_idx):
         """
         This function has the potential of being written in numba by using numba.typed.Dict!
         """
         n_hop = len(src_neighbors_node)
         makekey = nodets2key
         nodetime2emb = {}
-        if enc == 'spd':
-            for k in range(n_hop-1, -1, -1):
-                for src_node, src_ts, tgt_node, tgt_ts in zip(src_neighbors_node[k], src_neighbors_ts[k],
-                                                              tgt_neighbors_node[k], tgt_neighbors_ts[k]):
+        # landing probability encoding, n_hop+1 types of probabilities for each node
+        src_neighbors_node, src_neighbors_ts = [[src]] + src_neighbors_node, [[cut_time]] + src_neighbors_ts
+        tgt_neighbors_node, tgt_neighbors_ts = [[tgt]] + tgt_neighbors_node, [[cut_time]] + tgt_neighbors_ts
+        for k in range(n_hop+1): # k=0,1,...,n_hop
+            k_hop_total = len(src_neighbors_node[k]) # number of k-hop neighbors of source node
+            for src_node, src_ts, tgt_node, tgt_ts in zip(src_neighbors_node[k], src_neighbors_ts[k],
+                                                          tgt_neighbors_node[k], tgt_neighbors_ts[k]):
+                src_key, tgt_key = makekey(batch_idx, src_node, src_ts), makekey(batch_idx, tgt_node, tgt_ts)
 
-                    src_key, tgt_key = makekey(batch_idx, src_node, src_ts), makekey(batch_idx, tgt_node, tgt_ts)
+                if src_key not in nodetime2emb:
+                    nodetime2emb[src_key] = np.zeros((2, n_hop+1), dtype=np.float32)
+                if tgt_key not in nodetime2emb:
+                    nodetime2emb[tgt_key] = np.zeros((2, n_hop+1), dtype=np.float32)
+                nodetime2emb[src_key][0, k] += 1/k_hop_total  # convert into landing probabilities by normalizing with k hop sampling number
+                nodetime2emb[tgt_key][1, k] += 1/k_hop_total  # convert into landing probabilities by normalizing with k hop sampling number
+        null_key = makekey(batch_idx, 0, 0.0)
+        nodetime2emb[null_key] = np.zeros((2, n_hop + 1), dtype=np.float32)
 
-                    if src_key not in nodetime2emb:
-                        nodetime2emb[src_key] = [k+1, 2*n_hop]  # 2*n_hop for disconnected case
-                    else:
-                        nodetime2emb[src_key][0] = k+1
-                    if tgt_key not in nodetime2emb:
-                        nodetime2emb[tgt_key] = [2*n_hop, k+1]
-                    else:
-                        nodetime2emb[tgt_key][1] = k+1
-            # add two end nodes
-            src_key = makekey(batch_idx, src, cut_time)
-            tgt_key = makekey(batch_idx, tgt, cut_time)
-
-            if src_key in nodetime2emb:
-                nodetime2emb[src_key][0] = 0
-            else:
-                nodetime2emb[src_key] = [0, 2*n_hop]
-            if tgt_key in nodetime2emb:
-                nodetime2emb[tgt_key][1] = 0
-            else:
-                nodetime2emb[tgt_key] = [2*n_hop, 0]
-            null_key = makekey(batch_idx, 0, 0.0)
-            nodetime2emb[null_key] = [2 * n_hop, 2 * n_hop]
-           # Fix a big bug with 0.0! Also, very important to keep null node far away from the two end nodes!
-        elif enc == 'lp':
-            # landing probability encoding, n_hop+1 types of probabilities for each node
-            src_neighbors_node, src_neighbors_ts = [[src]] + src_neighbors_node, [[cut_time]] + src_neighbors_ts
-            tgt_neighbors_node, tgt_neighbors_ts = [[tgt]] + tgt_neighbors_node, [[cut_time]] + tgt_neighbors_ts
-            for k in range(n_hop+1):
-                k_hop_total = len(src_neighbors_node[k])
-                for src_node, src_ts, tgt_node, tgt_ts in zip(src_neighbors_node[k], src_neighbors_ts[k],
-                                                              tgt_neighbors_node[k], tgt_neighbors_ts[k]):
-                    src_key, tgt_key = makekey(batch_idx, src_node, src_ts), makekey(batch_idx, tgt_node, tgt_ts)
-                    # src_ts, tgt_ts = PositionEncoder.float2str(src_ts), PositionEncoder.float2str(tgt_ts)
-                    # src_key, tgt_key = (src_node, src_ts), (tgt_node, tgt_ts)
-                    if src_key not in nodetime2emb:
-                        nodetime2emb[src_key] = np.zeros((2, n_hop+1), dtype=np.float32)
-                    if tgt_key not in nodetime2emb:
-                        nodetime2emb[tgt_key] = np.zeros((2, n_hop+1), dtype=np.float32)
-                    nodetime2emb[src_key][0, k] += 1/k_hop_total  # convert into landing probabilities by normalizing with k hop sampling number
-                    nodetime2emb[tgt_key][1, k] += 1/k_hop_total  # convert into landing probabilities by normalizing with k hop sampling number
-            null_key = makekey(batch_idx, 0, 0.0)
-            nodetime2emb[null_key] = np.zeros((2, n_hop + 1), dtype=np.float32)
-            # nodetime2emb[(0, PositionEncoder.float2str(0.0))] = np.zeros((2, n_hop+1), dtype=np.float32)
-        else:
-            assert(enc == 'saw')  # self-based anonymous walk, no mutual distance encoding
-            src_neighbors_node, src_neighbors_ts = [[src]] + src_neighbors_node, [[cut_time]] + src_neighbors_ts
-            tgt_neighbors_node, tgt_neighbors_ts = [[tgt]] + tgt_neighbors_node, [[cut_time]] + tgt_neighbors_ts
-            src_seen_nodes2label = {}
-            tgt_seen_nodes2label = {}
-            for k in range(n_hop + 1):
-                for src_node, src_ts, tgt_node, tgt_ts in zip(src_neighbors_node[k], src_neighbors_ts[k],
-                                                              tgt_neighbors_node[k], tgt_neighbors_ts[k]):
-                    src_key, tgt_key = makekey(batch_idx, src_node, src_ts), makekey(batch_idx, tgt_node, tgt_ts)
-                    # encode src node tree
-                    if src_key not in nodetime2emb:
-                        nodetime2emb[src_key] = np.zeros((n_hop + 1, ), dtype=np.float32)
-                    if src_node not in src_seen_nodes2label:
-                        new_src_node_label = k
-                        src_seen_nodes2label[src_key] = k
-                    else:
-                        new_src_node_label = src_seen_nodes2label[src_node]
-                    nodetime2emb[src_key][new_src_node_label] = 1
-
-                    # encode tgt node tree
-                    if tgt_key not in nodetime2emb:
-                        nodetime2emb[tgt_key] = np.zeros((n_hop + 1, ), dtype=np.float32)
-                    if tgt_node not in tgt_seen_nodes2label:
-                        new_tgt_node_label = k
-                        tgt_seen_nodes2label[tgt_node] = k
-                    else:
-                        new_tgt_node_label = tgt_seen_nodes2label[tgt_node]
-                    nodetime2emb[src_key][new_tgt_node_label] = 1
-            null_key = makekey(batch_idx, 0, 0.0)
-            nodetime2emb[null_key] = np.zeros((n_hop + 1, ), dtype=np.float32)
-            # nodetime2emb[(0, PositionEncoder.float2str(0.0))] = np.zeros((n_hop + 1, ), dtype=np.float32)
-        # for key, value in nodetime2emb.items():
-        #     nodetime2emb[key] = torch.tensor(value)
         return nodetime2emb
 
     def forward(self, node_record, t_record):
@@ -444,6 +338,28 @@ class PositionEncoder(nn.Module):
             encodings = self.trainable_embedding(encodings.float())  # now shape [batch, support_n, pos_dim]
         return encodings
 
+class TimeEncoder(torch.nn.Module):
+    def __init__(self, expand_dim, factor=5):
+        super(TimeEncoder, self).__init__()
+
+        self.time_dim = expand_dim
+        self.factor = factor
+        self.basis_freq = torch.nn.Parameter((torch.from_numpy(1 / 10 ** np.linspace(0, 9, self.time_dim))).float())
+        self.phase = torch.nn.Parameter(torch.zeros(self.time_dim).float())
+
+
+    def forward(self, ts):
+        # ts: [N, L]
+        batch_size = ts.size(0)
+        seq_len = ts.size(1)
+
+        ts = ts.view(batch_size, seq_len, 1)  # [N, L, 1]
+        map_ts = ts * self.basis_freq.view(1, 1, -1)  # [N, L, time_dim]
+        map_ts += self.phase.view(1, 1, -1)
+
+        harmonic = torch.cos(map_ts)
+
+        return harmonic
 
 class RandomWalkAttention(nn.Module):
     '''
@@ -468,7 +384,7 @@ class RandomWalkAttention(nn.Module):
         self.feature_encoder = FeatureEncoder(self.feat_dim, self.model_dim, self.dropout_p)  # encode all types of features along each temporal walk
         self.position_encoder = FeatureEncoder(self.pos_dim, self.pos_dim, self.dropout_p)  # encode specifially spatio-temporal features along each temporal walk
         self.projector = nn.Sequential(nn.Linear(self.feature_encoder.model_dim+self.position_encoder.model_dim, self.attn_dim),  # notice that self.feature_encoder.model_dim may not be exactly self.model_dim is its not even number because of the usage of bi-lstm
-                                       nn.ReLU(), nn.Dropout(self.dropout_p))  # TODO: whether to add #[, nn.Dropout())]?
+                                       nn.ReLU(), nn.Dropout(self.dropout_p))
         self.self_attention = TransformerEncoderLayer(d_model=self.attn_dim, nhead=self.n_head,
                                                       dim_feedforward=4*self.attn_dim, dropout=self.dropout_p,
                                                       activation='relu')

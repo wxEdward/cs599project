@@ -5,10 +5,10 @@ from sklearn.metrics import average_precision_score
 from sklearn.metrics import roc_auc_score
 
 
-def eval_one_epoch(hint, tgan, sampler, src, dst, ts, label, val_e_idx_l=None):
+def eval_one_epoch(hint, cawn, sampler, src, dst, ts, label, val_e_idx_l=None):
     val_acc, val_ap, val_f1, val_auc = [], [], [], []
     with torch.no_grad():
-        tgan = tgan.eval()
+        cawn = cawn.eval()
         TEST_BATCH_SIZE = 30
         num_test_instance = len(src)
         num_test_batch = math.ceil(num_test_instance / TEST_BATCH_SIZE)
@@ -26,7 +26,7 @@ def eval_one_epoch(hint, tgan, sampler, src, dst, ts, label, val_e_idx_l=None):
             size = len(src_l_cut)
             src_l_fake, dst_l_fake = sampler.sample(size)
 
-            pos_prob, neg_prob = tgan.contrast(src_l_cut, dst_l_cut, dst_l_fake, ts_l_cut, e_l_cut, test=True)
+            pos_prob, neg_prob = cawn.contrast(src_l_cut, dst_l_cut, dst_l_fake, ts_l_cut, e_l_cut, test=True)
 
             pred_score = np.concatenate([(pos_prob).cpu().numpy(), (neg_prob).cpu().numpy()])
             pred_label = pred_score > 0.5
